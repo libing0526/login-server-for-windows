@@ -1,16 +1,15 @@
 #pragma once
 #include <string>
 #include <map>
-
-#include "Include/mysql/include/mysql.h"
-
-#include "Include/rapidjson/rapidjson.h"
-#include "Include/rapidjson/document.h"
-#include "Include/rapidjson/prettywriter.h"  
-#include "Include/rapidjson/stringbuffer.h" 
-using namespace rapidjson;
-
 #include <windows.h>
+
+#include "../Include/mysql/include/mysql.h"
+
+#include "../Include/rapidjson/rapidjson.h"
+#include "../Include/rapidjson/document.h"
+#include "../Include/rapidjson/prettywriter.h"  
+#include "../Include/rapidjson/stringbuffer.h" 
+using namespace rapidjson;
 
 //客户端业务类，一个连接对应一个类，此类只处理业务，不负责网络通信
 class CClientParse

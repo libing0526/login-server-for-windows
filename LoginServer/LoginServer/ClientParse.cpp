@@ -2,6 +2,8 @@
 #include "ClientParse.h"
 #include "logger.h"
 
+#pragma comment(lib, "../Include/mysql/lib/libmysql.lib")
+
 #define DB_IP		"localhost"
 #define DB_USER		"root"
 #define DB_PWD		"575619"

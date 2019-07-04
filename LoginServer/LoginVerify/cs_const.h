@@ -9,3 +9,4 @@
 #define CS_GETUSERLEVEL      9
 
 #define CS_RELOGINTHREAD     99
+#define CS_KEEPALIVE		100
