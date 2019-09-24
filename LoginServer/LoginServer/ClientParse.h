@@ -35,6 +35,9 @@ private:
 	//校验是否重复登录
 	void UpdateLoginState(const std::string& strUser);
 
+	//清除某个用户的登陆态
+	void RemoveLoginState(const std::string& strUser);
+	
 private:
 	//登录
 	void Login(Document& doc);
@@ -63,7 +66,7 @@ private:
 
 	std::string m_userName;		//用户名
 
-	static CRITICAL_SECTION m_section;	//锁
+	static CRITICAL_SECTION s_section;	//锁
 
 public:
 	bool m_bReLogin = false;	//是否是重复登录

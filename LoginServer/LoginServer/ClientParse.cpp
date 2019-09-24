@@ -12,7 +12,7 @@
 
 CClientParse::CClientParse()
 {
-	InitializeCriticalSection(&m_section);
+	InitializeCriticalSection(&s_section);
 
 	m_nType = CS_UNDEFINED;
 
@@ -36,7 +36,7 @@ CClientParse::CClientParse()
 
 CClientParse::~CClientParse()
 {
-	DeleteCriticalSection(&m_section);
+	DeleteCriticalSection(&s_section);
 
 	if (m_pSqlCon)
 	{
@@ -165,7 +165,7 @@ std::string CClientParse::GetDefaultExp()
 
 void CClientParse::UpdateLoginState(const std::string& strUser)
 {
-	EnterCriticalSection(&m_section);
+	EnterCriticalSection(&s_section);
 
 	auto it = s_ClientMap.find(strUser);
 	if (it != s_ClientMap.end())
@@ -180,7 +180,16 @@ void CClientParse::UpdateLoginState(const std::string& strUser)
 		s_ClientMap[strUser] = this;
 	}
 
-	LeaveCriticalSection(&m_section);
+	LeaveCriticalSection(&s_section);
+}
+
+void CClientParse::RemoveLoginState(const std::string& strUser)
+{
+	EnterCriticalSection(&s_section);
+
+	s_ClientMap.erase(strUser);
+
+	LeaveCriticalSection(&s_section);
 }
 
 void CClientParse::Login(Document& doc)
@@ -230,6 +239,11 @@ void CClientParse::Login(Document& doc)
 		MYSQL_RES *res = mysql_store_result(m_pSqlCon);//将结果保存在res结构体中
 		if (mysql_fetch_row(res))
 		{
+			if (userName.compare(m_userName) != 0 && !m_userName.empty())
+			{
+				//清除之前用户的登录状态
+				RemoveLoginState(m_userName);
+			}
 			m_userName = userName;
 			m_strResult = "2000";
 
@@ -490,13 +504,13 @@ void CClientParse::CheckRelogin(Document& doc)
 	}
 }
 
-CRITICAL_SECTION CClientParse::m_section;
+CRITICAL_SECTION CClientParse::s_section;
 
 std::map<std::string, CClientParse*> CClientParse::s_ClientMap;
 
 void CClientParse::DeleteSelfLoginState(CClientParse* pClient)
 {
-	EnterCriticalSection(&m_section);
+	EnterCriticalSection(&s_section);
 
 	auto it = s_ClientMap.begin();
 	for (; it != s_ClientMap.end(); it++)
@@ -508,5 +522,5 @@ void CClientParse::DeleteSelfLoginState(CClientParse* pClient)
 		}
 	}
 
-	LeaveCriticalSection(&m_section);
+	LeaveCriticalSection(&s_section);
 }
