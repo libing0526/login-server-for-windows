@@ -1,52 +1,46 @@
 #include "pch.h"
 #include "ClientParse.h"
-#include "logger.h"
 
-#pragma comment(lib, "../Include/mysql/lib/libmysql.lib")
 
-#define DB_IP		"localhost"
-#define DB_USER		"root"
-#define DB_PWD		"575619"
-#define DB_NAME		"login"
-#define TABLE_NAME	"USER"
+std::string string2UTF8(const std::string & str) {
+	int nwLen = ::MultiByteToWideChar(CP_ACP, 0, str.c_str(), -1, NULL, 0);
+
+	wchar_t * pwBuf = new wchar_t[nwLen + 1];//一定要加1，不然会出现尾巴  
+	ZeroMemory(pwBuf, nwLen * 2 + 2);
+
+	::MultiByteToWideChar(CP_ACP, 0, str.c_str(), str.length(), pwBuf, nwLen);
+
+	int nLen = ::WideCharToMultiByte(CP_UTF8, 0, pwBuf, -1, NULL, NULL, NULL, NULL);
+
+	char * pBuf = new char[nLen + 1];
+	ZeroMemory(pBuf, nLen + 1);
+
+	::WideCharToMultiByte(CP_UTF8, 0, pwBuf, nwLen, pBuf, nLen, NULL, NULL);
+
+	std::string retStr(pBuf);
+
+	delete[]pwBuf;
+	delete[]pBuf;
+
+	pwBuf = NULL;
+	pBuf = NULL;
+
+	return retStr;
+}
 
 CClientParse::CClientParse()
 {
-	InitializeCriticalSection(&s_section);
 
-	m_nType = CS_UNDEFINED;
-
-	m_pSqlCon = mysql_init((MYSQL*)0);
-	if (m_pSqlCon != NULL && mysql_real_connect(m_pSqlCon, DB_IP, DB_USER, DB_PWD, DB_NAME, 3306, NULL, 0))
-	{
-		if (!mysql_select_db(m_pSqlCon, DB_NAME)) 
-		{
-			INFO_LOGGER << "Select successfully the database!" << END_LOGGER;
-			m_pSqlCon->reconnect = 1;
-		}
-	}
-	else 
-	{
-		std::string strErr = mysql_error(m_pSqlCon);
-		WARNNING_LOGGER << "Connect Database Error " << strErr << END_LOGGER;
-		m_pSqlCon = NULL;
-	}
 }
-
 
 CClientParse::~CClientParse()
 {
-	DeleteCriticalSection(&s_section);
-
-	if (m_pSqlCon)
-	{
-		mysql_close(m_pSqlCon);
-	}
+	
 }
 
 void CClientParse::Run(const std::string& strMsg)
 {
-	m_nType = CS_UNDEFINED;
+	int nType = CS_UNDEFINED;
 
 	if (strMsg.empty())
 		return;
@@ -71,9 +65,9 @@ void CClientParse::Run(const std::string& strMsg)
 	//获取业务类型
 	if (document.HasMember("type") && document["type"].IsInt())
 	{
-		m_nType = document["type"].GetInt();
+		nType = document["type"].GetInt();
 	}
-	if (m_nType == CS_UNDEFINED)
+	if (nType == CS_UNDEFINED)
 	{
 		//WARNNING_LOGGER << "业务类型为: " << m_nType << "，不支持" << END_LOGGER;
 		return;
@@ -84,7 +78,7 @@ void CClientParse::Run(const std::string& strMsg)
 	//std::cout << m_nType << std::endl;
 
 	//处理不同的业务
-	switch (m_nType)
+	switch (nType)
 	{
 	case CS_LOGIN:
 		Login(document);
@@ -100,6 +94,9 @@ void CClientParse::Run(const std::string& strMsg)
 		break;
 	case CS_GETUSERLEVEL:
 		GetUserLevel(document);
+		break;
+	case CS_GETFUNCTIONPERMISSION:
+		GetFunctionPermission(document);
 		break;
 	case CS_RELOGINTHREAD:
 		CheckRelogin(document);
@@ -165,7 +162,7 @@ std::string CClientParse::GetDefaultExp()
 
 void CClientParse::UpdateLoginState(const std::string& strUser)
 {
-	EnterCriticalSection(&s_section);
+	CAutoLock lck(&s_clientLock);
 
 	auto it = s_ClientMap.find(strUser);
 	if (it != s_ClientMap.end())
@@ -179,17 +176,13 @@ void CClientParse::UpdateLoginState(const std::string& strUser)
 		//没有登录，保存
 		s_ClientMap[strUser] = this;
 	}
-
-	LeaveCriticalSection(&s_section);
 }
 
 void CClientParse::RemoveLoginState(const std::string& strUser)
 {
-	EnterCriticalSection(&s_section);
+	CAutoLock lck(&s_clientLock);
 
 	s_ClientMap.erase(strUser);
-
-	LeaveCriticalSection(&s_section);
 }
 
 void CClientParse::Login(Document& doc)
@@ -206,38 +199,55 @@ void CClientParse::Login(Document& doc)
 		return;
 	}
 
-	std::string userName = doc["userName"].GetString();
-	std::string sql = "SELECT NAME from USER WHERE NAME=\'" + userName + "\'";
-	bool existUserName = false;
-	int rc = mysql_real_query(m_pSqlCon, sql.c_str(), sql.length());
-	if (rc != 0)
+	SqlConNode *pNode = s_sqlPool.GetFree();
+	if (!pNode)
 	{
-		WARNNING_LOGGER << "SELECT NAME USER WHERE NAME= " << userName << " Failed:" << END_LOGGER;
-		m_strResult = "2003";
+		WARNNING_LOGGER << "获取空闲节点失败！" << END_LOGGER;
 		return;
 	}
-	MYSQL_RES *res = mysql_store_result(m_pSqlCon);//将结果保存在res结构体中
+	MYSQL *pSqlCon = pNode->pSqlCon;
+	if (!pSqlCon)
+	{
+		WARNNING_LOGGER << "获取数据库连接失败！" << END_LOGGER;
+		return;
+	}
+
+	std::string userName = doc["userName"].GetString();
+	std::string sql = "SELECT NAME from user WHERE NAME=\'" + userName + "\'";
+	bool existUserName = false;
+	int rc = mysql_real_query(pSqlCon, sql.c_str(), sql.length());
+	if (rc != 0)
+	{
+		
+		WARNNING_LOGGER << "SELECT NAME from user WHERE NAME=" << userName << " Failed:" << mysql_error(pSqlCon) << END_LOGGER;
+		m_strResult = "-3";
+		s_sqlPool.Recycle(pNode);
+		return;
+	}
+	MYSQL_RES *res = mysql_store_result(pSqlCon);//将结果保存在res结构体中
 	if (!mysql_fetch_row(res))
 	{
-		m_strResult = "2001";
+		m_strResult = "-1";
 		INFO_LOGGER << "用户: " << userName << " 不存在" << END_LOGGER;
+		s_sqlPool.Recycle(pNode);
 		return;
 	}
 
 	std::string passWord = doc["passWord"].GetString();
-	sql = "SELECT * from USER WHERE NAME=\'" + userName + "\' and PASSWORD=\'" + passWord + "\'";
-	bool exist = false;
-	rc = mysql_real_query(m_pSqlCon, sql.c_str(), sql.length());
+	sql = "SELECT * from user WHERE NAME=\'" + userName + "\' and PASSWORD=\'" + passWord + "\'";
+	rc = mysql_real_query(pSqlCon, sql.c_str(), sql.length());
 	if (rc != 0)
 	{
-		WARNNING_LOGGER << "SELECT * from USER WHERE NAME= " << userName << " Failed:" << END_LOGGER;
-		m_strResult = "2003";
+		WARNNING_LOGGER << "SELECT * from user WHERE NAME= " << userName << " Failed:" << mysql_error(pSqlCon) << END_LOGGER;
+		m_strResult = "-3";
+		s_sqlPool.Recycle(pNode);
 		return;
 	}
 	else
 	{
-		MYSQL_RES *res = mysql_store_result(m_pSqlCon);//将结果保存在res结构体中
-		if (mysql_fetch_row(res))
+		MYSQL_RES *res = mysql_store_result(pSqlCon);//将结果保存在res结构体中
+		MYSQL_ROW row = NULL;
+		if (row = mysql_fetch_row(res))
 		{
 			if (userName.compare(m_userName) != 0 && !m_userName.empty())
 			{
@@ -245,7 +255,9 @@ void CClientParse::Login(Document& doc)
 				RemoveLoginState(m_userName);
 			}
 			m_userName = userName;
-			m_strResult = "2000";
+			//m_strResult = "2000";
+			m_strResult = row[0];	//保存用户id
+			m_userId = m_strResult;
 
 			UpdateLoginState(m_userName);
 
@@ -253,15 +265,17 @@ void CClientParse::Login(Document& doc)
 		}
 		else
 		{
-			m_strResult = "2002";
+			m_strResult = "-2";
 			WARNNING_LOGGER << "账号:" << userName << " 密码:" << passWord << " 不正确" << END_LOGGER;
 		}
 	}
+
+	s_sqlPool.Recycle(pNode);
 }
 
 void CClientParse::Register(Document& doc)
 {
-	std::string userName, passWord, qqCount, expDate, level, userType;
+	std::string userName, passWord, qqCount, expDate, level, userType, referCode;
 
 	//用户名必须存在
 	if (doc.HasMember("userName") && doc["userName"].IsString())
@@ -285,6 +299,20 @@ void CClientParse::Register(Document& doc)
 		return;
 	}
 
+	//经销商推荐码不存在，默认给0
+	if (doc.HasMember("referCode") && doc["referCode"].IsString())
+	{
+		referCode = doc["referCode"].GetString();
+		if (referCode.empty())
+		{
+			referCode = "0";
+		}
+	}
+	else
+	{
+		referCode = "0";
+	}
+
 	if (doc.HasMember("qqCount") && doc["qqCount"].IsString())
 	{
 		qqCount = doc["qqCount"].GetString();
@@ -305,38 +333,121 @@ void CClientParse::Register(Document& doc)
 		userType = doc["userType"].GetString();
 	}
 
-	//先看是否账号已存在
-	std::string sql = "SELECT NAME from USER WHERE NAME=\'" + userName + "\'";
-	bool existUserName = false;
-	int rc = mysql_real_query(m_pSqlCon, sql.c_str(), sql.length());
-	if (rc != 0)
+	SqlConNode *pNode = s_sqlPool.GetFree();
+	if (!pNode)
 	{
-		WARNNING_LOGGER << "SELECT NAME USER WHERE NAME= " << userName << " Failed:" << END_LOGGER;
-		m_strResult = "1001";
+		WARNNING_LOGGER << "获取空闲节点失败！" << END_LOGGER;
 		return;
 	}
-	MYSQL_RES *res = mysql_store_result(m_pSqlCon);//将结果保存在res结构体中
+	MYSQL *pSqlCon = pNode->pSqlCon;
+	if (!pSqlCon)
+	{
+		WARNNING_LOGGER << "获取数据库连接失败！" << END_LOGGER;
+		return;
+	}
+
+	//先看是否账号已存在
+	std::string sql = "SELECT NAME from user WHERE NAME=\'" + userName + "\'";
+	bool existUserName = false;
+	int rc = mysql_real_query(pSqlCon, sql.c_str(), sql.length());
+	if (rc != 0)
+	{
+		WARNNING_LOGGER << "SELECT NAME user WHERE NAME= " << userName << " Failed:" << mysql_error(pSqlCon) << END_LOGGER;
+		m_strResult = "1001";
+		s_sqlPool.Recycle(pNode);
+		return;
+	}
+	MYSQL_RES *res = mysql_store_result(pSqlCon);//将结果保存在res结构体中
 	if (mysql_fetch_row(res))
 	{
 		m_strResult = "1002";
 		INFO_LOGGER << "账号已存在，请尝试选择其它账号注册！: " << userName << END_LOGGER;
+		s_sqlPool.Recycle(pNode);
 		return;
+	}
+
+	//再看经销商码是否存在，是否无效
+	sql = "SELECT status from saler WHERE refer_code=\'" + referCode + "\'";
+	rc = mysql_real_query(pSqlCon, sql.c_str(), sql.length());
+	if (rc != 0)
+	{
+		WARNNING_LOGGER << sql << " Failed:" << mysql_error(pSqlCon) << END_LOGGER;
+		m_strResult = "1001";
+		s_sqlPool.Recycle(pNode);
+		return;
+	}
+	res = mysql_store_result(pSqlCon);//将结果保存在res结构体中
+	MYSQL_ROW row = mysql_fetch_row(res);
+	if (!row)
+	{
+		m_strResult = "1003";
+		s_sqlPool.Recycle(pNode);
+		return;
+	}
+	else
+	{
+		int nStatus = atoi(row[0]);
+		if (nStatus != 0)
+		{
+			m_strResult = "1004";
+			s_sqlPool.Recycle(pNode);
+			return;
+		}
 	}
 
 	//不存在则注册
 	std::string expTime = GetDefaultExp();
 	//sql = "INSERT INTO USER (NAME, PASSWORD, QQCOUNT, EXP) VALUES (\'" + userName + "', '" + passWord + +"', '" + qqCount + "', '" + expTime + "')";
-	sql = "INSERT INTO USER (NAME, PASSWORD, QQCOUNT, EXP, LEVEL, USERTYPE) VALUES (\'" + \
-		userName + "', '" + passWord + "', '" + qqCount + "', '" + expTime + "', '" + level + "', '" + userType + "')";
-	rc = mysql_real_query(m_pSqlCon, sql.c_str(), sql.length());
+	sql = "INSERT INTO user (NAME, PASSWORD, QQCOUNT, EXP, LEVEL, USERTYPE, referer, register_time) VALUES (\'" + \
+		userName + "', '" + passWord + "', '" + qqCount + "', '" + expTime + "', '" + level + "', '" + userType + "', '" + referCode + "',NOW())";
+	rc = mysql_real_query(pSqlCon, sql.c_str(), sql.length());
 	if (rc != 0)
 	{
-		WARNNING_LOGGER << "SELECT NAME USER WHERE NAME= " << userName << " Failed:" << END_LOGGER;
-		m_strResult = "1003";
+		WARNNING_LOGGER << "SELECT NAME user WHERE NAME= " << userName << " Failed:" << mysql_error(pSqlCon) << END_LOGGER;
+		m_strResult = "1001";
+		s_sqlPool.Recycle(pNode);
 		return;
 	}
+
+	//获取当前用户id
+	sql = "SELECT * from user WHERE NAME=\'" + userName + "\' and PASSWORD=\'" + passWord + "\'";
+	rc = mysql_real_query(pSqlCon, sql.c_str(), sql.length());
+	if (rc != 0)
+	{
+		WARNNING_LOGGER << sql << "Failed" << mysql_error(pSqlCon) << END_LOGGER;
+	}
+	else
+	{
+		MYSQL_RES *res = mysql_store_result(pSqlCon);//将结果保存在res结构体中
+		MYSQL_ROW row = mysql_fetch_row(res);
+		if (row)
+		{
+			//注册完后，需要新建一个自选股和条件
+			char szSql[256] = { 0 };
+			sprintf_s(szSql, sizeof(szSql) - 1, "INSERT INTO user_block (user_id, name, sort_num, visible, internal_flag, creation_time) VALUES (\
+				%d ,'%s',%d,%d,%d,NOW())", atoi(row[0]), string2UTF8("自选股").c_str(), 0, 1, 1);
+			sql = szSql;
+			rc = mysql_real_query(pSqlCon, sql.c_str(), sql.length());
+			if(rc != 0)
+			{
+				WARNNING_LOGGER << sql << "Failed" << mysql_error(pSqlCon) << END_LOGGER;
+			}
+
+			sprintf_s(szSql, sizeof(szSql) - 1, "INSERT INTO user_block (user_id, name, sort_num, visible, internal_flag, creation_time) VALUES (\
+				%d ,'%s',%d,%d,%d,NOW())", atoi(row[0]), string2UTF8("临时条件股").c_str(), 0, 1, 2);
+			sql = szSql;
+			rc = mysql_real_query(pSqlCon, sql.c_str(), sql.length());
+			if (rc != 0)
+			{
+				WARNNING_LOGGER << sql << "Failed" << mysql_error(pSqlCon) << END_LOGGER;
+			}
+		}
+	}
+
 	m_strResult = "1000";
 	INFO_LOGGER << "账号注册成功: " << userName << END_LOGGER;
+
+	s_sqlPool.Recycle(pNode);
 }
 
 void CClientParse::ResetPassWord(Document& doc)
@@ -376,20 +487,35 @@ void CClientParse::ResetPassWord(Document& doc)
 		return;
 	}
 
-	std::string sql = "SELECT PASSWORD from USER WHERE NAME=\'" + userName + "\'";
-	int rc = mysql_real_query(m_pSqlCon, sql.c_str(), sql.length());
-	if (rc != 0)
+	SqlConNode *pNode = s_sqlPool.GetFree();
+	if (!pNode)
 	{
-		WARNNING_LOGGER << "SELECT NAME USER WHERE NAME= " << userName << " Failed:" << END_LOGGER;
-		m_strResult = "5001";
+		WARNNING_LOGGER << "获取空闲节点失败！" << END_LOGGER;
 		return;
 	}
-	MYSQL_RES *res = mysql_store_result(m_pSqlCon);//将结果保存在res结构体中
+	MYSQL *pSqlCon = pNode->pSqlCon;
+	if (!pSqlCon)
+	{
+		WARNNING_LOGGER << "获取数据库连接失败！" << END_LOGGER;
+		return;
+	}
+
+	std::string sql = "SELECT PASSWORD from user WHERE NAME=\'" + userName + "\'";
+	int rc = mysql_real_query(pSqlCon, sql.c_str(), sql.length());
+	if (rc != 0)
+	{
+		WARNNING_LOGGER << "SELECT NAME user WHERE NAME= " << userName << " Failed:" << mysql_error(pSqlCon) << END_LOGGER;
+		m_strResult = "5001";
+		s_sqlPool.Recycle(pNode);
+		return;
+	}
+	MYSQL_RES *res = mysql_store_result(pSqlCon);//将结果保存在res结构体中
 	MYSQL_ROW row = mysql_fetch_row(res);
 	if (!row)
 	{
 		m_strResult = "5004";
 		INFO_LOGGER << "用户: " << userName << " 不存在" << END_LOGGER;
+		s_sqlPool.Recycle(pNode);
 		return;
 	}
 
@@ -399,20 +525,23 @@ void CClientParse::ResetPassWord(Document& doc)
 	{
 		INFO_LOGGER << "输入的旧密码不正确:" << userName << END_LOGGER;
 		m_strResult = "5002";
+		s_sqlPool.Recycle(pNode);
 		return;
 	}
 
 	//更新密码
-	sql = "UPDATE USER SET PASSWORD=\'" + newPassWord + "\'" + \
+	sql = "UPDATE user SET PASSWORD=\'" + newPassWord + "\'" + \
 		"WHERE NAME=\'" + userName + "\'";;
-	rc = mysql_real_query(m_pSqlCon, sql.c_str(), sql.length());
+	rc = mysql_real_query(pSqlCon, sql.c_str(), sql.length());
 	if (rc != 0)
 	{
-		ERROR_LOGGER << "UPDATE USER SET PASSWORD: " << userName << " Failed" << END_LOGGER;
+		ERROR_LOGGER << "UPDATE user SET PASSWORD: " << userName << " Failed" << mysql_error(pSqlCon) << END_LOGGER;
 		m_strResult = "5003";
 	}
 	m_strResult = "0";
 	INFO_LOGGER << "RESET PASSWORD SUCCEED: " << userName << END_LOGGER;
+
+	s_sqlPool.Recycle(pNode);
 }
 
 void CClientParse::GetUserLevel(Document& doc)
@@ -423,26 +552,90 @@ void CClientParse::GetUserLevel(Document& doc)
 		return;
 	}
 
-	std::string sql = "SELECT LEVEL from USER WHERE NAME=\'" + m_userName + "\'";
-	int rc = mysql_real_query(m_pSqlCon, sql.c_str(), sql.length());
+	SqlConNode *pNode = s_sqlPool.GetFree();
+	if (!pNode)
+	{
+		WARNNING_LOGGER << "获取空闲节点失败！" << END_LOGGER;
+		return;
+	}
+	MYSQL *pSqlCon = pNode->pSqlCon;
+	if (!pSqlCon)
+	{
+		WARNNING_LOGGER << "获取数据库连接失败！" << END_LOGGER;
+		return;
+	}
+
+	std::string sql = "SELECT LEVEL from user WHERE NAME=\'" + m_userName + "\'";
+	int rc = mysql_real_query(pSqlCon, sql.c_str(), sql.length());
 	if (rc != 0)
 	{
 		//WARNNING_LOGGER << "SELECT LEVEL USER WHERE NAME= " << m_userName << " Failed:" << END_LOGGER;
 		m_strResult = "2003";
+		s_sqlPool.Recycle(pNode);
 		return;
 	}
-	MYSQL_RES *res = mysql_store_result(m_pSqlCon);//将结果保存在res结构体中
+	MYSQL_RES *res = mysql_store_result(pSqlCon);//将结果保存在res结构体中
 	MYSQL_ROW row = mysql_fetch_row(res);
-	if (!row)
+	if (row == nullptr || *row == nullptr)
 	{
 		m_strResult = "2001";
 		//INFO_LOGGER << "用户: " << m_userName << " 不存在" << END_LOGGER;
+		s_sqlPool.Recycle(pNode);
 		return;
 	}
 
 	//结果赋值
 	m_strResult = row[0];
 	INFO_LOGGER << "用户:" << m_userName << " 等级: " << m_strResult << END_LOGGER;
+
+	s_sqlPool.Recycle(pNode);
+}
+
+void CClientParse::GetFunctionPermission(Document& doc)
+{
+	if (m_userName.empty() || atoi(m_userId.c_str()) <= 0)
+	{
+		m_strResult = "";
+		return;
+	}
+	m_strResult = "";
+
+	SqlConNode *pNode = s_sqlPool.GetFree();
+	if (!pNode)
+	{
+		WARNNING_LOGGER << "获取空闲节点失败！" << END_LOGGER;
+		return;
+	}
+	MYSQL *pSqlCon = pNode->pSqlCon;
+	if (!pSqlCon)
+	{
+		WARNNING_LOGGER << "获取数据库连接失败！" << END_LOGGER;
+		return;
+	}
+
+	//select uv.user_id,uv.version_id,v.name,vf.function_id,f.name,uv.expiry_time from user_version uv,version_function vf,function f,app_version v 
+	//where uv.user_id=2 and uv.version_id=vf.version_id and f.id=vf.function_id and v.id=uv.version_id
+	std::string sql = "select uv.user_id,uv.version_id,v.name,vf.function_id,f.name,uv.expiry_time from user_version uv,version_function vf,function f,app_version v \
+		where uv.user_id=" + m_userId + " and uv.version_id=vf.version_id and f.id=vf.function_id and v.id=uv.version_id";
+	int rc = mysql_real_query(pSqlCon, sql.c_str(), sql.length());
+	if (rc != 0)
+	{
+		//WARNNING_LOGGER << "SELECT LEVEL USER WHERE NAME= " << m_userName << " Failed:" << END_LOGGER;
+		m_strResult = "-1";
+		s_sqlPool.Recycle(pNode);
+		return;
+	}
+	MYSQL_RES *res = mysql_store_result(pSqlCon);//将结果保存在res结构体中
+	MYSQL_ROW row;
+	while (row = mysql_fetch_row(res))
+	{
+		m_strResult += row[3];
+		m_strResult += ";";
+	}
+
+	s_sqlPool.Recycle(pNode);
+
+	INFO_LOGGER << "用户:" << m_userName << " 函数控制权限为: " << m_strResult << END_LOGGER;
 }
 
 void CClientParse::BeyondDeadLine(Document& doc)
@@ -453,20 +646,34 @@ void CClientParse::BeyondDeadLine(Document& doc)
 		return;
 	}
 
-	std::string sql = "SELECT EXP from USER WHERE NAME=\'" + m_userName + "\'";
-	int rc = mysql_real_query(m_pSqlCon, sql.c_str(), sql.length());
+	SqlConNode *pNode = s_sqlPool.GetFree();
+	if (!pNode)
+	{
+		return;
+	}
+	MYSQL *pSqlCon = pNode->pSqlCon;
+	if (!pNode || !pSqlCon)
+	{
+		WARNNING_LOGGER << "获取数据库连接失败！" << END_LOGGER;
+		return;
+	}
+
+	std::string sql = "SELECT EXP from user WHERE NAME=\'" + m_userName + "\'";
+	int rc = mysql_real_query(pSqlCon, sql.c_str(), sql.length());
 	if (rc != 0)
 	{
 		//WARNNING_LOGGER << "SELECT LEVEL USER WHERE NAME= " << m_userName << " Failed:" << END_LOGGER;
 		m_strResult = "3";
+		s_sqlPool.Recycle(pNode);
 		return;
 	}
-	MYSQL_RES *res = mysql_store_result(m_pSqlCon);//将结果保存在res结构体中
+	MYSQL_RES *res = mysql_store_result(pSqlCon);//将结果保存在res结构体中
 	MYSQL_ROW row = mysql_fetch_row(res);
 	if (!row)
 	{
 		m_strResult = "2001";
 		//INFO_LOGGER << "用户: " << m_userName << " 不存在" << END_LOGGER;
+		s_sqlPool.Recycle(pNode);
 		return;
 	}
 
@@ -488,6 +695,8 @@ void CClientParse::BeyondDeadLine(Document& doc)
 	{
 		m_strResult = "1";
 	}
+
+	s_sqlPool.Recycle(pNode);
 }
 
 void CClientParse::CheckRelogin(Document& doc)
@@ -504,13 +713,9 @@ void CClientParse::CheckRelogin(Document& doc)
 	}
 }
 
-CRITICAL_SECTION CClientParse::s_section;
-
-std::map<std::string, CClientParse*> CClientParse::s_ClientMap;
-
 void CClientParse::DeleteSelfLoginState(CClientParse* pClient)
 {
-	EnterCriticalSection(&s_section);
+	CAutoLock lck(&s_clientLock);
 
 	auto it = s_ClientMap.begin();
 	for (; it != s_ClientMap.end(); it++)
@@ -521,6 +726,11 @@ void CClientParse::DeleteSelfLoginState(CClientParse* pClient)
 			break;
 		}
 	}
-
-	LeaveCriticalSection(&s_section);
 }
+
+CLock CClientParse::s_clientLock;
+
+CObjectPool<SqlConNode> CClientParse::s_sqlPool;
+
+std::map<std::string, CClientParse*> CClientParse::s_ClientMap;
+

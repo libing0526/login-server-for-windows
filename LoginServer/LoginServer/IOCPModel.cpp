@@ -97,6 +97,8 @@ DWORD WINAPI CIOCPModel::_WorkerThread(LPVOID lpParam)
 			{
 				//INFO_LOGGER << "客户端 " << inet_ntoa(pSocketContext->m_ClientAddr.sin_addr) << ":" << ntohs(pSocketContext->m_ClientAddr.sin_port) << " 断开连接." << END_LOGGER;
 
+				ERROR_LOGGER << "客户端" <<  pIoContext->GetUserName() << "已退出!" << END_LOGGER;
+
 				// 释放掉对应的资源
 				pIOCPModel->_RemoveContext(pSocketContext);
 
@@ -264,9 +266,10 @@ bool CIOCPModel::PostRecv(PER_IO_CONTEXT* pIoContext)
 	int nBytesRecv = WSARecv(pIoContext->m_sockAccept, p_wbuf, 1, &dwBytes, &dwFlags, p_ol, NULL);
 
 	// 如果返回值错误，并且错误的代码并非是Pending的话，那就说明这个重叠请求失败了
-	if ((SOCKET_ERROR == nBytesRecv) && (WSA_IO_PENDING != WSAGetLastError()))
+	int iErr = WSAGetLastError();
+	if ((SOCKET_ERROR == nBytesRecv) && (WSA_IO_PENDING != iErr))
 	{
-		ERROR_LOGGER << "投递第一个WSARecv失败！" << END_LOGGER;
+		ERROR_LOGGER << "投递第一个WSARecv失败[" << iErr << "]" << END_LOGGER;
 		return false;
 	}
 
@@ -526,6 +529,15 @@ bool CIOCPModel::_PostAccept(PER_IO_CONTEXT* pAcceptIoContext)
 	{
 		ERROR_LOGGER << "创建用于Accept的Socket失败！错误代码: " << WSAGetLastError() << END_LOGGER;
 		return false;
+	}
+
+	//设置该套接字非阻塞
+	unsigned long ul = 1;
+	int nRet = ioctlsocket(pAcceptIoContext->m_sockAccept, FIONBIO, (unsigned long*)&ul);
+	if (nRet == SOCKET_ERROR)
+	{
+		//设置套接字非阻塞模式，失败处理，先记个日志
+		ERROR_LOGGER << "设置套接字阻塞模式失败[" << WSAGetLastError() << "]" << END_LOGGER;
 	}
 
 	// 投递AcceptEx
@@ -823,7 +835,7 @@ bool CIOCPModel::HandleError(PER_SOCKET_CONTEXT *pContext, const DWORD& dwErr)
 	// 可能是客户端异常退出了
 	else if (ERROR_NETNAME_DELETED == dwErr)
 	{
-		ERROR_LOGGER << "检测到客户端异常退出!" << END_LOGGER;
+		ERROR_LOGGER << "客户端已退出!" << END_LOGGER;
 		this->_RemoveContext(pContext);
 		return true;
 	}

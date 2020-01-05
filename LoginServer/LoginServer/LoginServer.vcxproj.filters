@@ -27,6 +27,12 @@
     <ClInclude Include="ClientParse.h">
       <Filter>头文件</Filter>
     </ClInclude>
+    <ClInclude Include="object_pool.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="Lock.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="pch.cpp">
@@ -42,6 +48,9 @@
       <Filter>源文件</Filter>
     </ClCompile>
     <ClCompile Include="ClientParse.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="Lock.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
   </ItemGroup>

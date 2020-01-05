@@ -103,6 +103,14 @@ typedef struct _PER_IO_CONTEXT
 		m_wsaBuf.len = MAX_BUFFER_LEN;
 	}
 
+	//获取当前用户名
+	std::string GetUserName()
+	{
+		if (m_pClientParse)
+			return m_pClientParse->GetUserName();
+		return "";
+	}
+
 } PER_IO_CONTEXT, *PPER_IO_CONTEXT;
 
 
